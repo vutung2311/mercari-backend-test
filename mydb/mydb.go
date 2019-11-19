@@ -313,7 +313,7 @@ func (db *DB) Close() error {
 	return forEachReplica(
 		context.Background(),
 		db.getAllBackend(),
-		func(ctx context.Context, backendSQL BackendSQL) error {
+		func(_ context.Context, backendSQL BackendSQL) error {
 			return stackError.WithStack(backendSQL.Close())
 		},
 	)
@@ -323,7 +323,7 @@ func (db *DB) SetConnMaxLifetime(d time.Duration) {
 	_ = forEachReplica(
 		context.Background(),
 		db.getAllBackend(),
-		func(ctx context.Context, backendSQL BackendSQL) error {
+		func(_ context.Context, backendSQL BackendSQL) error {
 			backendSQL.SetConnMaxLifetime(d)
 			return nil
 		},
@@ -334,7 +334,7 @@ func (db *DB) SetMaxIdleConns(n int) {
 	_ = forEachReplica(
 		context.Background(),
 		db.getAllBackend(),
-		func(ctx context.Context, backendSQL BackendSQL) error {
+		func(_ context.Context, backendSQL BackendSQL) error {
 			backendSQL.SetMaxIdleConns(n)
 			return nil
 		},
@@ -345,7 +345,7 @@ func (db *DB) SetMaxOpenConns(n int) {
 	_ = forEachReplica(
 		context.Background(),
 		db.getAllBackend(),
-		func(ctx context.Context, backendSQL BackendSQL) error {
+		func(_ context.Context, backendSQL BackendSQL) error {
 			backendSQL.SetMaxOpenConns(n)
 			return nil
 		},
