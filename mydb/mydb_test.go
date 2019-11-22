@@ -190,8 +190,14 @@ func TestDB_PingContext(t *testing.T) {
 }
 
 func TestDB_QueryContext(t *testing.T) {
-	replicaReadTimeout := 20 * time.Millisecond
+	replicaReadTimeout := 100 * time.Millisecond
+	sleepLongerThanReplicaReadTimeout := func() {
+		time.Sleep(replicaReadTimeout + replicaReadTimeout/2)
+	}
 	healthCheckPeriod := 500 * time.Millisecond
+	sleepLongerThanHealthCheckPeriod := func() {
+		time.Sleep(healthCheckPeriod + healthCheckPeriod/2)
+	}
 	maxReadAttempt := uint32(3)
 	ctxKey := "context-key"
 
@@ -232,21 +238,24 @@ func TestDB_QueryContext(t *testing.T) {
 		On("QueryContext", selectCtx, selectQuery, selectArgs).Once().Return(replica2ResultRow, nil).
 		On("QueryContext", secondTimeoutCtx, secondTimeoutSelectQuery, secondTimeoutArgs).Once().Return(replica2ResultRow, nil).
 		On("QueryContext", slaveTimedOutSelectCtx, slaveTimedOutSelectQuery, slaveTimedOutSelectArgs).Once().Run(func(_ mock.Arguments) {
-		time.Sleep(30 * time.Millisecond)
-	}).Return((*sql.Rows)(nil), nil).
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Rows)(nil), errors.New("timeout error from replica2 for slaveTimedOutSelectCtx")).
 		On("QueryContext", firstTimeoutCtx, firstTimeoutSelectQuery, firstTimeoutArgs).Once().Run(func(_ mock.Arguments) {
-		time.Sleep(30 * time.Millisecond)
-	}).Return((*sql.Rows)(nil), nil)
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Rows)(nil), errors.New("timeout error from replica2 for firstTimeoutCtx"))
 
 	replica3 := new(sqlMock.SQL)
 	replica3.On("Ping").Return(errors.New("offline")).
 		On("QueryContext", slaveTimedOutSelectCtx, slaveTimedOutSelectQuery, slaveTimedOutSelectArgs).Once().Run(func(_ mock.Arguments) {
-		time.Sleep(30 * time.Millisecond)
-	}).Return((*sql.Rows)(nil), nil).
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Rows)(nil), errors.New("timeout error from replica3 for slaveTimedOutSelectCtx")).
 		On("QueryContext", firstTimeoutCtx, firstTimeoutSelectQuery, firstTimeoutArgs).Once().Run(func(_ mock.Arguments) {
-		time.Sleep(30 * time.Millisecond)
-	}).Return((*sql.Rows)(nil), nil).
-		On("QueryContext", secondTimeoutCtx, secondTimeoutSelectQuery, secondTimeoutArgs).Once().Return((*sql.Rows)(nil), nil)
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Rows)(nil), errors.New("timeout error from replica3 for firstTimeoutCtx")).
+		On("QueryContext", secondTimeoutCtx, secondTimeoutSelectQuery, secondTimeoutArgs).Once().Return(
+		(*sql.Rows)(nil),
+		errors.New("unexpected error from replica3 for secondTimeoutCtx"),
+	)
 
 	tests := []struct {
 		name                     string
@@ -317,7 +326,7 @@ func TestDB_QueryContext(t *testing.T) {
 				got, err = db.QueryContext(secondTimeoutCtx, secondTimeoutSelectQuery, secondTimeoutArgs...)
 				require.Same(t, replica1ResultRow, got)
 				require.NoError(t, err)
-				time.Sleep(healthCheckPeriod + time.Second)
+				sleepLongerThanHealthCheckPeriod()
 				got, err = db.QueryContext(secondTimeoutCtx, secondTimeoutSelectQuery, secondTimeoutArgs...)
 				require.Same(t, replica2ResultRow, got)
 				require.NoError(t, err)

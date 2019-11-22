@@ -1,11 +1,13 @@
 package retry
 
 // Do will do input function for retryTimes if there is error or return if there is no error
-func Do(fn func() error, retryTimes uint32) {
+func Do(fn func() error, retryTimes uint32) error {
+	var err error
 	for i := uint32(0); i < retryTimes; i++ {
-		err := fn()
+		err = fn()
 		if err == nil {
-			return
+			return nil
 		}
 	}
+	return err
 }

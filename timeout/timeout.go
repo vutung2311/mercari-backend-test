@@ -1,6 +1,7 @@
 package timeout
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -8,17 +9,19 @@ import (
 var errTimedOut = errors.New("timed out")
 
 // DoOrElse will run doFn and wait, if doFn take longer than timeout then it will to timeoutFn
-func DoOrElse(timeout time.Duration, doFn func() error, timeoutFn func()) error {
+func DoOrElse(timeout time.Duration, doFn func(context.Context) error, timeoutFn func()) error {
 	errChan := make(chan error)
+	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)
+	defer cancelFunc()
 	go func() {
-		errChan <- doFn()
+		errChan <- doFn(ctx)
 		close(errChan)
 	}()
 
 	select {
 	case err := <-errChan:
 		return err
-	case <-time.After(timeout):
+	case <-ctx.Done():
 		timeoutFn()
 	}
 

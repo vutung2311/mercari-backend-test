@@ -133,7 +133,7 @@ func (db *DB) startPeriodHealthCheck() {
 					}
 					_ = timeout.DoOrElse(
 						db.readReplicaTimeout,
-						func() error {
+						func(ctx context.Context) error {
 							if db.readReplicas[i].Ping() == nil {
 								db.readReplicas[i].setOnline()
 							}
@@ -173,23 +173,19 @@ func (db *DB) getRoundRobinReplicaBackend(ctx context.Context, query string) *re
 	panic("all replicas are unreachable")
 }
 
-func (db *DB) retryOnReplicaElseTimeout(getReplicaFn func() *readReplica, doFn func(*readReplica) error) {
-	retry.Do(
+func (db *DB) retryOnReplicaElseTimeout(getReplicaFn func() *readReplica, doFn func(context.Context, *readReplica) error) error {
+	return retry.Do(
 		func() error {
 			replica := getReplicaFn()
-			err := timeout.DoOrElse(
+			return timeout.DoOrElse(
 				db.readReplicaTimeout,
-				func() error {
-					return doFn(replica)
+				func(ctx context.Context) error {
+					return doFn(ctx, replica)
 				},
 				func() {
 					replica.setOffline()
 				},
 			)
-			if !timeout.IsTimedOut(err) {
-				return nil
-			}
-			return err
 		},
 		db.maxReadAttempt,
 	)
@@ -197,72 +193,93 @@ func (db *DB) retryOnReplicaElseTimeout(getReplicaFn func() *readReplica, doFn f
 
 func (db *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 	var (
-		rows *sql.Rows
-		err  error
+		resultChan = make(chan *sql.Rows, 1)
+		err        error
 	)
 
-	db.retryOnReplicaElseTimeout(
+	err = db.retryOnReplicaElseTimeout(
 		func() *readReplica {
 			return db.getRoundRobinReplicaBackend(context.Background(), query)
 		},
-		func(replica *readReplica) error {
-			rows, err = replica.Query(query, args...)
+		func(timedOutCtx context.Context, replica *readReplica) error {
+			rows, err := replica.Query(query, args...)
+			if timedOutCtx.Err() != nil {
+				return nil
+			}
+			if err == nil {
+				resultChan <- rows
+				close(resultChan)
+			}
 			return err
 		},
 	)
 
-	return rows, err
+	return <-resultChan, err
 }
 
 func (db *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
 	var (
-		rows *sql.Rows
-		err  error
+		resultChan = make(chan *sql.Rows, 1)
+		err        error
 	)
-
-	db.retryOnReplicaElseTimeout(
+	err = db.retryOnReplicaElseTimeout(
 		func() *readReplica {
 			return db.getRoundRobinReplicaBackend(context.Background(), query)
 		},
-		func(replica *readReplica) error {
-			rows, err = replica.QueryContext(ctx, query, args...)
+		func(timedOutCtx context.Context, replica *readReplica) error {
+			rows, err := replica.QueryContext(ctx, query, args...)
+			if timedOutCtx.Err() != nil {
+				return nil
+			}
+			if err == nil {
+				resultChan <- rows
+				close(resultChan)
+			}
 			return err
 		},
 	)
 
-	return rows, err
+	return <-resultChan, err
 }
 
 func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
-	var row *sql.Row
+	var rowChan = make(chan *sql.Row, 1)
 
-	db.retryOnReplicaElseTimeout(
+	_ = db.retryOnReplicaElseTimeout(
 		func() *readReplica {
 			return db.getRoundRobinReplicaBackend(context.Background(), query)
 		},
-		func(replica *readReplica) error {
-			row = replica.QueryRow(query, args...)
+		func(timedOutCtx context.Context, replica *readReplica) error {
+			if timedOutCtx.Err() != nil {
+				return nil
+			}
+			rowChan <- replica.QueryRow(query, args...)
+			close(rowChan)
 			return nil
 		},
 	)
 
-	return row
+	return <-rowChan
 }
 
 func (db *DB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	var row *sql.Row
+	var rowChan = make(chan *sql.Row, 1)
 
-	db.retryOnReplicaElseTimeout(
+	_ = db.retryOnReplicaElseTimeout(
 		func() *readReplica {
 			return db.getRoundRobinReplicaBackend(context.Background(), query)
 		},
-		func(replica *readReplica) error {
-			row = replica.QueryRowContext(ctx, query, args...)
+		func(timedOutCtx context.Context, replica *readReplica) error {
+			if timedOutCtx.Err() != nil {
+				return nil
+			}
+			rowChan <- replica.QueryRowContext(ctx, query, args...)
+			close(rowChan)
 			return nil
 		},
 	)
 
-	return row
+	return <-rowChan
 }
 
 func (db *DB) Begin() (*sql.Tx, error) {

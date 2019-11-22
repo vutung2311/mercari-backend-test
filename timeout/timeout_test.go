@@ -1,6 +1,7 @@
 package timeout_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -11,10 +12,11 @@ import (
 func TestDoOrElse(t *testing.T) {
 	err1 := errors.New("doFn first error")
 	timedOut1 := false
+	timedOut2 := false
 
 	type args struct {
 		timeout   time.Duration
-		doFn      func() error
+		doFn      func(context.Context) error
 		timeoutFn func()
 	}
 	tests := []struct {
@@ -27,7 +29,7 @@ func TestDoOrElse(t *testing.T) {
 			name: "doFn finish first",
 			args: args{
 				timeout: 10 * time.Millisecond,
-				doFn: func() error {
+				doFn: func(context.Context) error {
 					<-time.After(5 * time.Millisecond)
 					return err1
 				},
@@ -43,16 +45,16 @@ func TestDoOrElse(t *testing.T) {
 			name: "doFn time out",
 			args: args{
 				timeout: 5 * time.Millisecond,
-				doFn: func() error {
+				doFn: func(context.Context) error {
 					<-time.After(10 * time.Millisecond)
 					return err1
 				},
 				timeoutFn: func() {
-					timedOut1 = true
+					timedOut2 = true
 				},
 			},
 			checkFn: func(err error) bool {
-				return timedOut1 == true && timeout.IsTimedOut(err)
+				return timedOut2 == true && timeout.IsTimedOut(err)
 			},
 		},
 	}
