@@ -170,7 +170,7 @@ func (db *DB) getRoundRobinReplicaBackend(ctx context.Context, query string) *re
 		}
 	}
 
-	panic("all replicas are unreachable")
+	return db.master
 }
 
 func (db *DB) retryOnReplicaElseTimeout(getReplicaFn func() *readReplica, doFn func(context.Context, *readReplica) error) error {
@@ -214,7 +214,10 @@ func (db *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
 		},
 	)
 
-	return <-resultChan, err
+	if err == nil {
+		return <-resultChan, nil
+	}
+	return nil, err
 }
 
 func (db *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
@@ -239,13 +242,16 @@ func (db *DB) QueryContext(ctx context.Context, query string, args ...interface{
 		},
 	)
 
-	return <-resultChan, err
+	if err == nil {
+		return <-resultChan, nil
+	}
+	return nil, err
 }
 
 func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
 	var rowChan = make(chan *sql.Row, 1)
 
-	_ = db.retryOnReplicaElseTimeout(
+	err := db.retryOnReplicaElseTimeout(
 		func() *readReplica {
 			return db.getRoundRobinReplicaBackend(context.Background(), query)
 		},
@@ -259,13 +265,16 @@ func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
 		},
 	)
 
-	return <-rowChan
+	if err == nil {
+		return <-rowChan
+	}
+	return nil
 }
 
 func (db *DB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
 	var rowChan = make(chan *sql.Row, 1)
 
-	_ = db.retryOnReplicaElseTimeout(
+	err := db.retryOnReplicaElseTimeout(
 		func() *readReplica {
 			return db.getRoundRobinReplicaBackend(context.Background(), query)
 		},
@@ -279,7 +288,10 @@ func (db *DB) QueryRowContext(ctx context.Context, query string, args ...interfa
 		},
 	)
 
-	return <-rowChan
+	if err == nil {
+		return <-rowChan
+	}
+	return nil
 }
 
 func (db *DB) Begin() (*sql.Tx, error) {
