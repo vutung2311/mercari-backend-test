@@ -311,11 +311,61 @@ func (db *DB) ExecContext(ctx context.Context, query string, args ...interface{}
 }
 
 func (db *DB) Prepare(query string) (*sql.Stmt, error) {
-	return db.master.Prepare(query)
+	var (
+		resultChan = make(chan *sql.Stmt, 1)
+		err        error
+	)
+
+	err = db.retryOnReplicaElseTimeout(
+		func() *readReplica {
+			return db.getRoundRobinReplicaBackend(context.Background(), query)
+		},
+		func(timedOutCtx context.Context, replica *readReplica) error {
+			rows, err := replica.Prepare(query)
+			if timedOutCtx.Err() != nil {
+				return nil
+			}
+			if err == nil {
+				resultChan <- rows
+				close(resultChan)
+			}
+			return err
+		},
+	)
+
+	if err == nil {
+		return <-resultChan, nil
+	}
+	return nil, err
 }
 
 func (db *DB) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	return db.master.PrepareContext(ctx, query)
+	var (
+		resultChan = make(chan *sql.Stmt, 1)
+		err        error
+	)
+
+	err = db.retryOnReplicaElseTimeout(
+		func() *readReplica {
+			return db.getRoundRobinReplicaBackend(context.Background(), query)
+		},
+		func(timedOutCtx context.Context, replica *readReplica) error {
+			rows, err := replica.PrepareContext(ctx, query)
+			if timedOutCtx.Err() != nil {
+				return nil
+			}
+			if err == nil {
+				resultChan <- rows
+				close(resultChan)
+			}
+			return err
+		},
+	)
+
+	if err == nil {
+		return <-resultChan, nil
+	}
+	return nil, err
 }
 
 func (db *DB) Ping() error {

@@ -8,7 +8,7 @@ import (
 
 var errTimedOut = errors.New("timed out")
 
-// DoOrElse will run doFn and wait, if doFn take longer than timeout then it will to timeoutFn
+// DoOrElse will run doFn and wait, if doFn take longer than timeout then it will call timeoutFn
 func DoOrElse(timeout time.Duration, doFn func(context.Context) error, timeoutFn func()) error {
 	errChan := make(chan error)
 	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)

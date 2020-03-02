@@ -347,6 +347,159 @@ func TestDB_QueryContext(t *testing.T) {
 	}
 }
 
+func TestDB_PrepareContext(t *testing.T) {
+	replicaReadTimeout := 100 * time.Millisecond
+	sleepLongerThanReplicaReadTimeout := func() {
+		time.Sleep(replicaReadTimeout + replicaReadTimeout/2)
+	}
+	healthCheckPeriod := 500 * time.Millisecond
+	sleepLongerThanHealthCheckPeriod := func() {
+		time.Sleep(healthCheckPeriod + healthCheckPeriod/2)
+	}
+	maxReadAttempt := uint32(3)
+	ctxKey := "context-key"
+
+	updateCtx := context.WithValue(context.Background(), ctxKey, "updateQuery")
+	updateQuery := "UPDATE master SET write = true;"
+
+	selectCtx := context.WithValue(context.Background(), ctxKey, "selectQuery")
+	selectQuery := "SELECT 1;"
+
+	slaveTimedOutSelectCtx := context.WithValue(context.Background(), ctxKey, "slaveTimedOutSelect")
+	slaveTimedOutSelectQuery := "SELECT * FROM slave1 LEFT JOIN slave2 ON slave1.id = slave2.id WHERE slave1.timeout = true;"
+
+	firstTimeoutCtx := context.WithValue(context.Background(), ctxKey, "firstTimeout")
+	firstTimeoutSelectQuery := "SELECT * FROM slave1 WHERE first_timeout = true;"
+	secondTimeoutCtx := context.WithValue(context.Background(), ctxKey, "secondTimeout")
+	secondTimeoutSelectQuery := "SELECT * FROM slave1 WHERE second_timeout = true;"
+
+	master := new(sqlMock.SQL)
+	masterResultStmt := new(sql.Stmt)
+	master.On("Ping").Return(nil).
+		On("PrepareContext", updateCtx, updateQuery).Once().Return(masterResultStmt, nil)
+
+	replica1 := new(sqlMock.SQL)
+	replica1ResultStmt := new(sql.Stmt)
+	replica1.On("Ping").Return(nil).
+		On("PrepareContext", slaveTimedOutSelectCtx, slaveTimedOutSelectQuery).Twice().Return(replica1ResultStmt, nil).
+		On("PrepareContext", firstTimeoutCtx, firstTimeoutSelectQuery).Once().Return(replica1ResultStmt, nil).
+		On("PrepareContext", secondTimeoutCtx, secondTimeoutSelectQuery).Once().Return(replica1ResultStmt, nil)
+
+	replica2ResultStmt := new(sql.Stmt)
+	replica2 := new(sqlMock.SQL)
+	replica2.On("Ping").Return(nil).
+		On("PrepareContext", selectCtx, selectQuery).Once().Return(replica2ResultStmt, nil).
+		On("PrepareContext", secondTimeoutCtx, secondTimeoutSelectQuery).Once().Return(replica2ResultStmt, nil).
+		On("PrepareContext", slaveTimedOutSelectCtx, slaveTimedOutSelectQuery).Once().Run(func(_ mock.Arguments) {
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Stmt)(nil), errors.New("timeout error from replica2 for slaveTimedOutSelectCtx")).
+		On("PrepareContext", firstTimeoutCtx, firstTimeoutSelectQuery).Once().Run(func(_ mock.Arguments) {
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Stmt)(nil), errors.New("timeout error from replica2 for firstTimeoutCtx"))
+
+	replica3 := new(sqlMock.SQL)
+	replica3.On("Ping").Return(errors.New("offline")).
+		On("PrepareContext", slaveTimedOutSelectCtx, slaveTimedOutSelectQuery).Once().Run(func(_ mock.Arguments) {
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Stmt)(nil), errors.New("timeout error from replica3 for slaveTimedOutSelectCtx")).
+		On("PrepareContext", firstTimeoutCtx, firstTimeoutSelectQuery).Once().Run(func(_ mock.Arguments) {
+		sleepLongerThanReplicaReadTimeout()
+	}).Return((*sql.Stmt)(nil), errors.New("timeout error from replica3 for firstTimeoutCtx")).
+		On("PrepareContext", secondTimeoutCtx, secondTimeoutSelectQuery).Once().Return(
+		(*sql.Stmt)(nil),
+		errors.New("unexpected error from replica3 for secondTimeoutCtx"),
+	)
+
+	tests := []struct {
+		name                     string
+		fields                   fields
+		testPerformAndAssertFunc func(*testing.T, *mydb.DB)
+	}{
+		{
+			name: "write query to go master node",
+			fields: fields{
+				master:             master,
+				replicaReadTimeout: replicaReadTimeout,
+				healthCheckPeriod:  healthCheckPeriod,
+				maxReadAttempt:     maxReadAttempt,
+				readReplicas:       []mydb.BackendSQL{replica1, replica2, replica3},
+			},
+			testPerformAndAssertFunc: func(t *testing.T, db *mydb.DB) {
+				got, err := db.PrepareContext(updateCtx, updateQuery)
+				require.Same(t, masterResultStmt, got)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "select query should go to next first online replica (replica2)",
+			fields: fields{
+				master:             master,
+				replicaReadTimeout: replicaReadTimeout,
+				healthCheckPeriod:  healthCheckPeriod,
+				maxReadAttempt:     maxReadAttempt,
+				readReplicas:       []mydb.BackendSQL{replica1, replica2, replica3},
+			},
+			testPerformAndAssertFunc: func(t *testing.T, db *mydb.DB) {
+				got, err := db.PrepareContext(selectCtx, selectQuery)
+				require.Same(t, replica2ResultStmt, got)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "query should be retried if some replicas (replica2, replica3) is suddenly unreachable, replica statuses should be offline afterward",
+			fields: fields{
+				master:             master,
+				replicaReadTimeout: replicaReadTimeout,
+				healthCheckPeriod:  healthCheckPeriod,
+				maxReadAttempt:     maxReadAttempt,
+				readReplicas:       []mydb.BackendSQL{replica1, replica2, replica3},
+			},
+			testPerformAndAssertFunc: func(t *testing.T, db *mydb.DB) {
+				got, err := db.PrepareContext(slaveTimedOutSelectCtx, slaveTimedOutSelectQuery)
+				require.Same(t, replica1ResultStmt, got)
+				require.NoError(t, err)
+				got, err = db.PrepareContext(slaveTimedOutSelectCtx, slaveTimedOutSelectQuery)
+				require.Same(t, replica1ResultStmt, got)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "health check should update replica statuses to online if they are back",
+			fields: fields{
+				master:             master,
+				replicaReadTimeout: replicaReadTimeout,
+				healthCheckPeriod:  healthCheckPeriod,
+				maxReadAttempt:     maxReadAttempt,
+				readReplicas:       []mydb.BackendSQL{replica1, replica2, replica3},
+			},
+			testPerformAndAssertFunc: func(t *testing.T, db *mydb.DB) {
+				got, err := db.PrepareContext(firstTimeoutCtx, firstTimeoutSelectQuery)
+				require.Same(t, replica1ResultStmt, got)
+				require.NoError(t, err)
+				got, err = db.PrepareContext(secondTimeoutCtx, secondTimeoutSelectQuery)
+				require.Same(t, replica1ResultStmt, got)
+				require.NoError(t, err)
+				sleepLongerThanHealthCheckPeriod()
+				got, err = db.PrepareContext(secondTimeoutCtx, secondTimeoutSelectQuery)
+				require.Same(t, replica2ResultStmt, got)
+				require.NoError(t, err)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := mydb.NewDB(
+				tt.fields.replicaReadTimeout,
+				tt.fields.healthCheckPeriod,
+				tt.fields.maxReadAttempt,
+				tt.fields.master,
+				tt.fields.readReplicas...,
+			)
+			tt.testPerformAndAssertFunc(t, db)
+		})
+	}
+}
+
 func TestIsReadOnlyQuery(t *testing.T) {
 	tests := []struct {
 		name  string

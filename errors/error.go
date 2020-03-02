@@ -10,7 +10,7 @@ type Error struct {
 	wrappedError error
 }
 
-// WithStack will wrap the provided error in another error with the stack-trace at the line of original error returning
+// WithStack will wrap the provided error in another error with the stack-trace at the line of original returned error
 func WithStack(err error) error {
 	if err == nil {
 		return err
